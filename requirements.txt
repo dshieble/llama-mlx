@@ -1,0 +1,5 @@
+sentencepiece
+torch
+flask
+numpy
+mlx
