@@ -3,3 +3,4 @@ torch
 flask
 numpy
 mlx
+json5

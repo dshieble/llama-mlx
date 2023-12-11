@@ -1,7 +1,10 @@
 # Copyright © 2023 Apple Inc.
 
 import argparse
+import json
 import math
+import os
+import json5
 import numpy as np
 from sentencepiece import SentencePieceProcessor
 import time
@@ -168,17 +171,26 @@ def toc(msg, start):
 
 
 def generate(args):
+  os.mkdir(args.output_path)
 
   # input("Press enter to start generation")
   # print("------")
 
-
   with open(args.prompt_path) as f:
-    args_prompt = f.read().strip()
+    raw_prompt = f.read().strip()
   
-  print(args_prompt, end="", flush=True)
+  print(raw_prompt, end="", flush=True)
 
-  x = mx.array([[tokenizer.bos_id()] + tokenizer.encode(args_prompt)])
+  tokenized_prompt = tokenizer.encode(raw_prompt)
+  prompt_metadata = {
+    "raw_prompt": raw_prompt,
+    "tokenized_prompt": tokenized_prompt,
+    "prompt_token_length": len(tokenized_prompt)
+  }
+  with open(os.path.join(args.output_path, "prompt_metadata.json"), "w") as f:
+    json.dump(prompt_metadata, f)
+  
+  x = mx.array([[tokenizer.bos_id()] + tokenized_prompt])
   prompt_processing = None
   tokens = []
   start = tic()
@@ -192,6 +204,16 @@ def generate(args):
 
     if len(tokens) >= args.num_tokens:
       break
+
+    elif args.stop_on_valid_json:
+      decoded_tokens = tokenizer.decode([t.item() for t in tokens])
+      try:
+        json5.loads(decoded_tokens)
+      except Exception as e:
+        pass
+      else:
+        # We've found valid json so we can break
+        break
 
     # elif (len(tokens) % args.write_every) == 0:
     #   # It is perfectly ok to eval things we have already eval-ed.
@@ -208,67 +230,69 @@ def generate(args):
   print("------")
   print(prompt_processing)
   print(full_gen)
-  with open(args.output_path, "w") as f:
+
+  print(f"Writing to {args.output_path}")
+  with open(os.path.join(args.output_path, "response.txt"), "w") as f:
     print(decoded_tokens, file=f, end="", flush=True)
 
 
-def few_shot_generate(args):
-  def possible_end(s):
-    word = "[Instruction]"
-    for i in range(len(word) - 1, 0, -1):
-      if s[-i:] == word[:i]:
-        return 0
-    if s[-len(word) :] == word:
-      return 1
-    return -1
+# def few_shot_generate(args):
+#   def possible_end(s):
+#     word = "[Instruction]"
+#     for i in range(len(word) - 1, 0, -1):
+#       if s[-i:] == word[:i]:
+#         return 0
+#     if s[-len(word) :] == word:
+#       return 1
+#     return -1
 
-  def generate(question):
-    x = mx.array([[tokenizer.bos_id()] + tokenizer.encode(question)])
-    skip = 0
-    prompt_processing = None
-    tokens = []
-    start = tic()
-    for token in model.generate(x, args.temp):
-      tokens.append(token)
+#   def generate(question):
+#     x = mx.array([[tokenizer.bos_id()] + tokenizer.encode(question)])
+#     skip = 0
+#     prompt_processing = None
+#     tokens = []
+#     start = tic()
+#     for token in model.generate(x, args.temp):
+#       tokens.append(token)
 
-      if len(tokens) == 1:
-        # Actually perform the computation to measure the prompt processing time
-        mx.eval(token)
-        prompt_processing = toc("Prompt processing", start)
+#       if len(tokens) == 1:
+#         # Actually perform the computation to measure the prompt processing time
+#         mx.eval(token)
+#         prompt_processing = toc("Prompt processing", start)
 
-      if len(tokens) >= args.num_tokens:
-        break
+#       if len(tokens) >= args.num_tokens:
+#         break
 
-      mx.eval(tokens)
-      token_list = [t.item() for t in tokens]
-      s = tokenizer.decode(token_list)
+#       mx.eval(tokens)
+#       token_list = [t.item() for t in tokens]
+#       s = tokenizer.decode(token_list)
 
-      end = possible_end(s)
-      if end == 0:
-        continue
-      if end == 1:
-        skip = len(s)
-        break
+#       end = possible_end(s)
+#       if end == 0:
+#         continue
+#       if end == 1:
+#         skip = len(s)
+#         break
 
-      print(s[skip:], end="", flush=True)
-      skip = len(s)
-      if token_list[-1] == tokenizer.eos_id():
-        break
+#       print(s[skip:], end="", flush=True)
+#       skip = len(s)
+#       if token_list[-1] == tokenizer.eos_id():
+#         break
 
-    mx.eval(tokens)
-    full_gen = toc("Full generation", start)
-    s = tokenizer.decode([t.item() for t in tokens])
-    print(s[skip:], end="", flush=True)
+#     mx.eval(tokens)
+#     full_gen = toc("Full generation", start)
+#     s = tokenizer.decode([t.item() for t in tokens])
+#     print(s[skip:], end="", flush=True)
 
-  with open(args.prompt_path) as f:
-    args_prompt = f.read().strip()
+#   with open(args.prompt_path) as f:
+#     args_prompt = f.read().strip()
   
-  print(args_prompt, end="", flush=True)
-  prompt = open(args_prompt).read().strip()
-  while True:
-    question = input("Ask a question: ")
-    generate(prompt.replace("{}", question))
-    print()
+#   print(args_prompt, end="", flush=True)
+#   prompt = open(args_prompt).read().strip()
+#   while True:
+#     question = input("Ask a question: ")
+#     generate(prompt.replace("{}", question))
+#     print()
 
 
 def load_model(model_path):
@@ -289,6 +313,7 @@ if __name__ == "__main__":
   parser.add_argument("--tokenizer", help="The sentencepiece tokenizer")
   parser.add_argument("--prompt_path", help="The message to be processed by the model")
   parser.add_argument("--output_path", help="The path to write the model output to")
+  parser.add_argument("--stop_on_valid_json", action="store_true", help="Stop generation when valid json is found")
 
   parser.add_argument(
     "--few-shot",
@@ -296,7 +321,7 @@ if __name__ == "__main__":
     help="Read a few shot prompt from a file (as in `sample_prompt.txt`).",
   )
   parser.add_argument(
-    "--num-tokens", "-n", type=int, default=100, help="How many tokens to generate"
+    "--num-tokens", "-n", type=int, default=1000, help="How many tokens to generate"
   )
   parser.add_argument(
     "--write-every", type=int, default=1, help="After how many tokens to detokenize"
@@ -314,6 +339,7 @@ if __name__ == "__main__":
   print("[INFO] Loading model from disk.")
   model = load_model(args.model)
   if args.few_shot:
-    few_shot_generate(args)
+    raise NotImplementedError
+    # few_shot_generate(args)
   else:
     generate(args)
